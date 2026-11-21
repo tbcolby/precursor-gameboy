@@ -1,0 +1,9 @@
+[package]
+name = "gameboy-core"
+version = "0.1.0"
+edition = "2021"
+description = "Pure Game Boy (LR35902) CPU logic: full instruction set, disassembler, demo programs. No Xous dependencies, unit-tested on the host"
+license = "Apache-2.0"
+
+# Keep this crate free of xous/gam/pddb so `cargo test` runs on any machine.
+[dependencies]
