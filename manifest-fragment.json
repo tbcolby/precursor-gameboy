@@ -1,0 +1,14 @@
+{
+    "gameboy": {
+        "context_name": "Game Boy",
+        "menu_name": {
+            "appmenu.gameboy": {
+                "en": "Game Boy",
+                "en-tts": "Game Boy",
+                "fr": "Game Boy",
+                "ja": "Game Boy",
+                "zh": "Game Boy"
+            }
+        }
+    }
+}

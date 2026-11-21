@@ -1,140 +1,175 @@
-//! State machine for Game Boy Emulator.
-//! States: DemoSelect, Running, Memory
+//! Screens, input and drawing for the Game Boy step debugger. All CPU
+//! behaviour is in `gameboy-core`.
 
-extern crate alloc;
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::format;
-use crate::cpu::{self, Cpu, DEMOS};
+use gam::menu::Point;
+use gam::GlyphStyle;
+use gameboy_core::demos::DEMOS;
+use gameboy_core::session::Session;
+use precursor_appkit::keys::Key;
+use precursor_appkit::layout::ListState;
+use precursor_appkit::screen::Screen;
 
-const KEY_UP: char = '\u{F700}';
-const KEY_DOWN: char = '\u{F701}';
-const KEY_LEFT: char = '\u{F702}';
-const KEY_RIGHT: char = '\u{F703}';
-const KEY_ENTER: char = '\u{000D}';
-const KEY_BACKSPACE: char = '\u{0008}';
-const KEY_MENU: char = '\u{2234}';
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum AppState { DemoSelect, Running, Memory }
-
-pub struct GbApp {
-    pub state: AppState,
-    pub needs_redraw: bool,
-    pub cpu: Cpu,
-    pub demo_cursor: usize,
-    pub disasm_lines: Vec<(u16, String)>,
-    pub disasm_scroll: usize,
-    pub mem_addr: u16,
-    pub paused: bool,
-    pub step_mode: bool,
+#[derive(PartialEq, Eq)]
+pub enum Action {
+    Stay,
+    Leave,
 }
 
-impl GbApp {
-    pub fn new() -> Self {
+enum Mode {
+    Demos,
+    Running,
+    Memory,
+}
+
+/// Bytes per memory-viewer row.
+const MEM_COLS: u16 = 8;
+
+pub struct App {
+    screen: Screen,
+    mode: Mode,
+    list: ListState,
+    visible_rows: usize,
+    session: Session,
+    mem_addr: u16,
+    foreground: bool,
+}
+
+impl App {
+    pub fn new(screen: Screen) -> Self {
         Self {
-            state: AppState::DemoSelect,
-            needs_redraw: true,
-            cpu: Cpu::new(),
-            demo_cursor: 0,
-            disasm_lines: Vec::new(),
-            disasm_scroll: 0,
-            mem_addr: 0x0100,
-            paused: true,
-            step_mode: true,
+            screen,
+            mode: Mode::Demos,
+            list: ListState::default(),
+            visible_rows: 5,
+            session: Session::new(0),
+            mem_addr: 0xC000,
+            foreground: true,
         }
     }
 
-    pub fn load_demo(&mut self, idx: usize) {
-        self.cpu = Cpu::new();
-        let demo = &DEMOS[idx];
-        self.cpu.load(0x0100, demo.code);
-        self.disassemble_around_pc();
-        self.paused = true;
-        self.step_mode = true;
+    pub fn screen(&self) -> &Screen { &self.screen }
+
+    pub fn on_foreground(&mut self) {
+        self.foreground = true;
+        self.screen.refresh_size();
+        self.draw();
     }
 
-    pub fn disassemble_around_pc(&mut self) {
-        self.disasm_lines.clear();
-        let mut addr = self.cpu.regs.pc;
-        for _ in 0..20 {
-            let (text, next) = cpu::disassemble(&self.cpu.mem, addr);
-            self.disasm_lines.push((addr, text));
-            addr = next;
-        }
-    }
+    pub fn on_background(&mut self) { self.foreground = false; }
 
-    pub fn step_cpu(&mut self) {
-        if !self.cpu.halted {
-            self.cpu.step();
-            self.disassemble_around_pc();
-        }
-    }
-
-    pub fn handle_key(&mut self, key: char) -> bool {
-        self.needs_redraw = true;
-        match self.state {
-            AppState::DemoSelect => self.key_select(key),
-            AppState::Running => self.key_running(key),
-            AppState::Memory => self.key_memory(key),
-        }
-    }
-
-    fn key_select(&mut self, key: char) -> bool {
-        match key {
-            KEY_MENU => return false,
-            KEY_UP => { if self.demo_cursor > 0 { self.demo_cursor -= 1; } }
-            KEY_DOWN => { if self.demo_cursor < DEMOS.len() - 1 { self.demo_cursor += 1; } }
-            KEY_ENTER => {
-                self.load_demo(self.demo_cursor);
-                self.state = AppState::Running;
-            }
-            _ => {}
-        }
-        true
-    }
-
-    fn key_running(&mut self, key: char) -> bool {
-        match key {
-            KEY_MENU => { self.state = AppState::DemoSelect; }
-            KEY_ENTER => {
-                // Single step
-                self.step_cpu();
-            }
-            ' ' => {
-                // Run until halt (max 1000 steps)
-                for _ in 0..1000 {
-                    if self.cpu.halted { break; }
-                    self.cpu.step();
+    pub fn on_key(&mut self, key: Key) -> Action {
+        match self.mode {
+            Mode::Demos => match key {
+                k if k.is_back() => return Action::Leave,
+                Key::Up => self.list.step(-1, DEMOS.len(), self.visible_rows),
+                Key::Down => self.list.step(1, DEMOS.len(), self.visible_rows),
+                Key::Enter => {
+                    self.session = Session::new(self.list.selected);
+                    self.mode = Mode::Running;
                 }
-                self.disassemble_around_pc();
-            }
-            'r' | 'R' => {
-                // Reset
-                self.load_demo(self.demo_cursor);
-            }
-            'm' | 'M' => {
-                self.mem_addr = 0xC000;
-                self.state = AppState::Memory;
-            }
-            KEY_DOWN => {
-                if self.disasm_scroll < self.disasm_lines.len().saturating_sub(1) { self.disasm_scroll += 1; }
-            }
-            KEY_UP => { if self.disasm_scroll > 0 { self.disasm_scroll -= 1; } }
-            _ => {}
+                _ => {}
+            },
+            Mode::Running => match key {
+                k if k.is_back() => self.mode = Mode::Demos,
+                Key::Enter => self.session.step(),
+                Key::Char(' ') => {
+                    self.session.run();
+                }
+                Key::Char('r') | Key::Char('R') => self.session.reset(),
+                Key::Char('m') | Key::Char('M') => {
+                    self.mem_addr = 0xC000;
+                    self.mode = Mode::Memory;
+                }
+                _ => {}
+            },
+            Mode::Memory => match key {
+                k if k.is_back() => self.mode = Mode::Running,
+                Key::Down => self.mem_addr = self.mem_addr.wrapping_add(MEM_COLS),
+                Key::Up => self.mem_addr = self.mem_addr.wrapping_sub(MEM_COLS),
+                Key::Right => self.mem_addr = self.mem_addr.wrapping_add(0x100),
+                Key::Left => self.mem_addr = self.mem_addr.wrapping_sub(0x100),
+                Key::Char('p') | Key::Char('P') => self.mem_addr = self.session.cpu.regs.pc,
+                Key::Char('s') | Key::Char('S') => self.mem_addr = self.session.cpu.regs.sp,
+                Key::Char('c') | Key::Char('C') => self.mem_addr = 0xC000,
+                _ => {}
+            },
         }
-        true
+        Action::Stay
     }
 
-    fn key_memory(&mut self, key: char) -> bool {
-        match key {
-            KEY_MENU | KEY_LEFT => { self.state = AppState::Running; }
-            KEY_DOWN => { self.mem_addr = self.mem_addr.wrapping_add(16); }
-            KEY_UP => { self.mem_addr = self.mem_addr.wrapping_sub(16); }
-            KEY_RIGHT => { self.mem_addr = self.mem_addr.wrapping_add(256); }
-            KEY_LEFT => { self.mem_addr = self.mem_addr.wrapping_sub(256); }
-            _ => {}
+    pub fn draw(&mut self) {
+        if !self.foreground {
+            return;
         }
-        true
+        self.screen.clear();
+        match self.mode {
+            Mode::Demos => self.draw_demos(),
+            Mode::Running => self.draw_running(),
+            Mode::Memory => self.draw_memory(),
+        }
+        self.screen.flush();
+    }
+
+    fn draw_demos(&mut self) {
+        let top = self.screen.header("Game Boy CPU");
+        let bottom = self.screen.footer("↑↓ select · ⏎ load · ⌫ leave");
+        let labels: Vec<String> = DEMOS.iter().map(|d| format!("{}: {}", d.name, d.description)).collect();
+        self.visible_rows = self.screen.list(top, bottom, &labels, &self.list);
+    }
+
+    fn draw_running(&mut self) {
+        let s = &self.session;
+        let r = &s.cpu.regs;
+        let top = self.screen.header(&format!("{} · {}", DEMOS[s.demo].name, s.status()));
+        let bottom = self.screen.footer("⏎ step · space run · r reset · m mem · ⌫ back");
+        let lh = self.screen.line_height(GlyphStyle::Small);
+        let flags = format!(
+            "{}{}{}{}",
+            if r.flag_z() { 'Z' } else { '-' },
+            if r.flag_n() { 'N' } else { '-' },
+            if r.flag_h() { 'H' } else { '-' },
+            if r.flag_c() { 'C' } else { '-' },
+        );
+        let lines = [
+            format!("A={:02X} F={:02X} BC={:04X} DE={:04X}", r.a, r.f, r.bc(), r.de()),
+            format!("HL={:04X} SP={:04X} PC={:04X}", r.hl(), r.sp, r.pc),
+            format!("{flags}  IME={}  cycles={}  instr={}", s.cpu.ime as u8, s.cpu.cycles, s.cpu.instructions_executed),
+        ];
+        let mut y = top;
+        for l in &lines {
+            self.screen.text(y, GlyphStyle::Small, l);
+            y += lh;
+        }
+        y += 4;
+        self.screen.line(Point::new(0, y), Point::new(self.screen.size().x - 1, y));
+        y += 4;
+        let rows = ((bottom - y) / (lh + 2)).max(1) as usize;
+        for (i, (addr, text)) in s.listing(rows).iter().enumerate() {
+            let marker = if i == 0 { "▸" } else { " " };
+            let row_tl = Point::new(0, y);
+            if i == 0 {
+                // Selected-row marker as a frame: TextView invert is ignored on app canvases.
+                self.screen.frame(row_tl, Point::new(self.screen.size().x - 1, y + lh + 1), 1);
+            }
+            self.screen.text(y + 1, GlyphStyle::Small, &format!("{marker}{addr:04X}  {text}"));
+            y += lh + 2;
+        }
+    }
+
+    fn draw_memory(&mut self) {
+        let top = self.screen.header(&format!("Memory ${:04X}", self.mem_addr));
+        let bottom = self.screen.footer("↑↓ ±8 · ←→ ±256 · p PC · s SP · c $C000 · ⌫");
+        let lh = self.screen.line_height(GlyphStyle::Small) + 2;
+        let rows = ((bottom - top) / lh).max(1) as usize;
+        let mut y = top;
+        for row in 0..rows {
+            let addr = self.mem_addr.wrapping_add(row as u16 * MEM_COLS);
+            let mut line = format!("{addr:04X}");
+            for col in 0..MEM_COLS {
+                line.push_str(&format!(" {:02X}", self.session.cpu.mem.read(addr.wrapping_add(col))));
+            }
+            self.screen.text(y, GlyphStyle::Small, &line);
+            y += lh;
+        }
     }
 }
