@@ -7,9 +7,12 @@
 //!   dispatch, HALT wake-up
 //! * [`disasm`]: disassembler built on the same decode as the executor
 //! * [`demos`]: hand-assembled demo programs (each is run to HALT in tests)
+//! * [`session`]: step/run/reset and the disassembly window for the shell
 
 pub mod cpu;
 pub mod demos;
 pub mod disasm;
+pub mod session;
 
 pub use cpu::{Cpu, Fault, Memory, Registers};
+pub use session::Session;
